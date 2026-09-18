@@ -1,4 +1,4 @@
-import { calculate, DEFAULT_PARAMS, evaluate, INTERVAL_MS, PRIORITY, resample } from './signals.mjs';
+import { calculate, DEFAULT_PARAMS, diagnose, evaluate, INTERVAL_MS, PRIORITY, resample } from './signals.mjs';
 
 export const DEFAULT_EXECUTION = Object.freeze({
   initialBalance: 100000, margin: 100, leverage: 10,
@@ -28,7 +28,8 @@ function exitPosition(pos, rawPrice, time, reason, cash, cfg) {
   const fee = pos.quantity * price * cfg.feeRate;
   const net = gross - pos.entryFee - fee + pos.fundingPnl;
   return { cash: cash + pos.margin + gross - fee, trade: {
-    slot: pos.slot, dir: pos.dir, entryTime: pos.entryTime, exitTime: time,
+    slot: pos.slot, dir: pos.dir, signalTime: pos.signalTime, diagnostics: pos.diagnostics,
+    entryTime: pos.entryTime, exitTime: time,
     entryPrice: pos.entryPrice, exitPrice: price, margin: pos.margin,
     grossPnl: gross, fees: pos.entryFee + fee, fundingPnl: pos.fundingPnl,
     netPnl: net, reason,
@@ -102,7 +103,8 @@ export function runBacktest(bars, funding = [], params = DEFAULT_PARAMS, options
         const identity = `${key}:${slots[key]}:${signalTime}`;
         if (seenSignals.has(identity)) continue;
         seenSignals.add(identity);
-        pending = { slot: key, dir: slots[key] };
+        pending = { slot: key, dir: slots[key], signalTime,
+          diagnostics: signalProvider ? null : diagnose(tfs[tf], index[tf], params) };
         break;
       }
     }
@@ -114,22 +116,29 @@ export function runBacktest(bars, funding = [], params = DEFAULT_PARAMS, options
 export function summarize(result) {
   const closed = result.trades, wins = closed.filter(t => t.netPnl > 0), losses = closed.filter(t => t.netPnl < 0);
   const grossWin = wins.reduce((s, t) => s + t.netPnl, 0), grossLoss = -losses.reduce((s, t) => s + t.netPnl, 0);
+  const group = selected => {
+    const positive = selected.filter(t => t.netPnl > 0);
+    const gain = positive.reduce((s, t) => s + t.netPnl, 0);
+    const loss = -selected.filter(t => t.netPnl < 0).reduce((s, t) => s + t.netPnl, 0);
+    const netPnl = selected.reduce((s, t) => s + t.netPnl, 0);
+    return { trades: selected.length, wins: positive.length, losses: selected.filter(t => t.netPnl < 0).length,
+      winRatePct: selected.length ? 100 * positive.length / selected.length : null,
+      profitFactor: loss ? gain / loss : null, expectancyUsdt: selected.length ? netPnl / selected.length : null,
+      netPnl, totalFees: selected.reduce((s, t) => s + t.fees, 0),
+      totalFundingPnl: selected.reduce((s, t) => s + t.fundingPnl, 0) };
+  };
   let peak = -Infinity, maxDrawdownPct = 0;
   for (const point of result.equity) {
     peak = Math.max(peak, point.equity);
     maxDrawdownPct = Math.max(maxDrawdownPct, peak > 0 ? (peak - point.equity) / peak * 100 : 0);
   }
-  const bySide = Object.fromEntries(['LONG', 'SHORT'].map(dir => {
-    const selected = closed.filter(t => t.dir === dir);
-    return [dir, { trades: selected.length, netPnl: selected.reduce((s, t) => s + t.netPnl, 0),
-      winRatePct: selected.length ? 100 * selected.filter(t => t.netPnl > 0).length / selected.length : null }];
-  }));
+  const bySide = Object.fromEntries(['LONG', 'SHORT'].map(dir => [dir, group(closed.filter(t => t.dir === dir))]));
+  const bySlot = Object.fromEntries(PRIORITY.map(slot => [slot, group(closed.filter(t => t.slot === slot))]));
   return { trades: closed.length, wins: wins.length, losses: losses.length,
     winRatePct: closed.length ? 100 * wins.length / closed.length : null,
     profitFactor: grossLoss ? grossWin / grossLoss : null,
     expectancyUsdt: closed.length ? closed.reduce((s, t) => s + t.netPnl, 0) / closed.length : null,
     maxDrawdownPct, finalEquity: result.finalEquity,
     totalFees: closed.reduce((s, t) => s + t.fees, 0),
-    totalFundingPnl: closed.reduce((s, t) => s + t.fundingPnl, 0), bySide };
+    totalFundingPnl: closed.reduce((s, t) => s + t.fundingPnl, 0), bySide, bySlot };
 }
-

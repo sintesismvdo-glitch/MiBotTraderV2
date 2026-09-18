@@ -152,7 +152,7 @@
     <div class="statusbar-inner">
       <div class="brand">
         <span class="brand-name">Mi Bot Trader</span>
-        <span class="brand-version">v3.4.2 BTC Lab</span>
+        <span class="brand-version">MiBotTraderV2.1 BTC Lab</span>
       </div>
       <span class="sim-badge">⚠ Cuenta ficticia — no ejecuta órdenes reales</span>
       <div class="api-cluster">
@@ -319,7 +319,8 @@
   setInterval(syncParamSummary, 2000); syncParamSummary();
 })();
 </script>
-<script>
+<script type="module">
+import { INTERVAL_MS, PRIORITY, V21_PARAMS, calculate, evaluate } from './lab/signals.mjs';
 (function(){
   const $ = id => document.getElementById(id);
   const fmt = (n, d=2) => n==null || isNaN(n) ? '—' : Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -335,25 +336,13 @@
   const TP_PCT = 25;    // sobre margen
   const BE_TRIGGER_PCT = 10; // sobre margen — a partir de acá, stop se mueve a 0% (breakeven)
 
-  const ACCOUNT_KEY = 'mibottrader_btc_account_v2';
-  const SLOT_STATE_KEY = 'mibottrader_btc_slot_state_v2';
+  const ACCOUNT_KEY = 'mibottrader_btc_account_v21';
+  const SLOT_STATE_KEY = 'mibottrader_btc_slot_state_v21';
 
   // 1 motor principal, 6 Multi-TF y 2 estados de cascada.
-  const MULTI_TF_DEFS = [
-    { entry:'4h',  trend:'1d', label:'4H'  },
-    { entry:'1h',  trend:'1d', label:'1H'  },
-    { entry:'15m', trend:'4h', label:'15M' },
-    { entry:'5m',  trend:'4h', label:'5M'  },
-    { entry:'3m',  trend:'1h', label:'3M'  },
-    { entry:'1m',  trend:'1h', label:'1M'  },
-  ];
-
   // Orden de prioridad para decidir CUÁL ranura se lleva la única posición disponible,
   // cuando varias señalan en la misma ronda: de la confirmación más sólida a la más liviana.
-  const SLOT_PRIORITY = [
-    'cascadeFull', 'cascadePartial', 'principal',
-    'multi:4h', 'multi:1h', 'multi:15m', 'multi:5m', 'multi:3m', 'multi:1m',
-  ];
+  const SLOT_PRIORITY = PRIORITY;
 
   let account = null;      // { cashBalance, openPositions:[], history:[] }
   let slotPrevDir = {};    // { slotKey: 'NONE'|'LONG'|'SHORT' } — para detectar flancos
@@ -423,231 +412,7 @@
     renderAll();
   }
 
-  // ==================== indicator math (idéntico a la app principal) ====================
-  function computeSMA(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){ let s=0; for(let j=i-len+1;j<=i;j++) s+=values[j]; out[i]=s/len; }
-    return out;
-  }
-  function computeEMA(values, len){
-    const out = new Array(values.length).fill(null);
-    const k = 2/(len+1);
-    if (len-1 >= values.length) return out;
-    let sum=0; for(let j=0;j<len;j++) sum+=values[j];
-    out[len-1]=sum/len;
-    for (let i=len;i<values.length;i++) out[i] = values[i]*k + out[i-1]*(1-k);
-    return out;
-  }
-  function computeStdDev(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){
-      let s=0; for(let j=i-len+1;j<=i;j++) s+=values[j];
-      const mean=s/len;
-      let sq=0; for(let j=i-len+1;j<=i;j++) sq+=Math.pow(values[j]-mean,2);
-      out[i]=Math.sqrt(sq/len);
-    }
-    return out;
-  }
-  function computeHighest(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){ let m=-Infinity; for(let j=i-len+1;j<=i;j++) if(values[j]>m) m=values[j]; out[i]=m; }
-    return out;
-  }
-  function computeLowest(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){ let m=Infinity; for(let j=i-len+1;j<=i;j++) if(values[j]<m) m=values[j]; out[i]=m; }
-    return out;
-  }
-  function computeTR(high, low, close){
-    const out = new Array(close.length).fill(null);
-    for (let i=0;i<close.length;i++){
-      if (i===0){ out[i]=high[i]-low[i]; continue; }
-      out[i]=Math.max(high[i]-low[i], Math.abs(high[i]-close[i-1]), Math.abs(low[i]-close[i-1]));
-    }
-    return out;
-  }
-  function computeRMA(values, len){
-    const out = new Array(values.length).fill(null);
-    if (values.length<len) return out;
-    let seed=0; for(let j=0;j<len;j++) seed+=values[j];
-    out[len-1]=seed/len;
-    for (let i=len;i<values.length;i++) out[i] = (out[i-1]*(len-1) + values[i]) / len;
-    return out;
-  }
-  function computeADX(high, low, close, len){
-    const n = close.length;
-    const plusDM = new Array(n).fill(0), minusDM = new Array(n).fill(0);
-    const tr = computeTR(high, low, close);
-    for (let i=1;i<n;i++){
-      const upMove = high[i]-high[i-1], downMove = low[i-1]-low[i];
-      plusDM[i] = (upMove>downMove && upMove>0) ? upMove : 0;
-      minusDM[i] = (downMove>upMove && downMove>0) ? downMove : 0;
-    }
-    const trRMA = computeRMA(tr, len), plusDMRMA = computeRMA(plusDM, len), minusDMRMA = computeRMA(minusDM, len);
-    const plusDI = new Array(n).fill(null), minusDI = new Array(n).fill(null), dx = new Array(n).fill(null);
-    for (let i=0;i<n;i++){
-      if (trRMA[i]==null || trRMA[i]===0) continue;
-      plusDI[i] = 100*plusDMRMA[i]/trRMA[i];
-      minusDI[i] = 100*minusDMRMA[i]/trRMA[i];
-      const sum = plusDI[i]+minusDI[i];
-      dx[i] = sum===0?0:100*Math.abs(plusDI[i]-minusDI[i])/sum;
-    }
-    const startIdx = dx.findIndex(v=>v!=null);
-    const adx = new Array(n).fill(null);
-    if (startIdx>=0){ const dxSlice = dx.slice(startIdx); const adxRMA = computeRMA(dxSlice, len); for (let i=0;i<adxRMA.length;i++) adx[startIdx+i]=adxRMA[i]; }
-    return { adx, plusDI, minusDI };
-  }
-  function computeSqueeze(high, low, close, bbLen, bbMult, kcLen, kcMult){
-    const n = close.length;
-    const basis = computeSMA(close, bbLen);
-    const stdev = computeStdDev(close, bbLen);
-    const upperBB = basis.map((b,i)=> b==null||stdev[i]==null?null:b+stdev[i]*bbMult);
-    const lowerBB = basis.map((b,i)=> b==null||stdev[i]==null?null:b-stdev[i]*bbMult);
-    const maKC = computeSMA(close, kcLen);
-    const tr = computeTR(high, low, close);
-    const rangeMA = computeSMA(tr, kcLen);
-    const upperKC = maKC.map((m,i)=> m==null||rangeMA[i]==null?null:m+rangeMA[i]*kcMult);
-    const lowerKC = maKC.map((m,i)=> m==null||rangeMA[i]==null?null:m-rangeMA[i]*kcMult);
-    const highestHigh = computeHighest(high, kcLen), lowestLow = computeLowest(low, kcLen), smaClose = computeSMA(close, kcLen);
-    const valSource = new Array(n).fill(null);
-    for (let i=0;i<n;i++){
-      if (highestHigh[i]==null||lowestLow[i]==null||smaClose[i]==null) continue;
-      const midHL = (highestHigh[i]+lowestLow[i])/2;
-      valSource[i] = close[i]-((midHL+smaClose[i])/2);
-    }
-    const val = new Array(n).fill(null);
-    for (let i=kcLen-1;i<n;i++){
-      let ok=true; for (let j=i-kcLen+1;j<=i;j++){ if(valSource[j]==null){ok=false;break;} }
-      if(!ok) continue;
-      let sumX=0,sumY=0,sumXY=0,sumX2=0;
-      for (let x=0;x<kcLen;x++){ const y=valSource[i-kcLen+1+x]; sumX+=x; sumY+=y; sumXY+=x*y; sumX2+=x*x; }
-      const denom = (kcLen*sumX2-sumX*sumX);
-      const slope = denom===0?0:(kcLen*sumXY-sumX*sumY)/denom;
-      const intercept = (sumY-slope*sumX)/kcLen;
-      val[i] = intercept+slope*(kcLen-1);
-    }
-    const sqzOn = new Array(n).fill(null);
-    for (let i=0;i<n;i++){
-      if(lowerBB[i]==null||lowerKC[i]==null||upperBB[i]==null||upperKC[i]==null) continue;
-      sqzOn[i] = (lowerBB[i] > lowerKC[i]) && (upperBB[i] < upperKC[i]);
-    }
-    return { val, sqzOn };
-  }
-  function computeHighestSafe(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){ let ok=true,m=-Infinity; for (let j=i-len+1;j<=i;j++){ if(values[j]==null){ok=false;break;} if(values[j]>m) m=values[j]; } out[i]=ok?m:null; }
-    return out;
-  }
-  function computeLowestSafe(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){ let ok=true,m=Infinity; for (let j=i-len+1;j<=i;j++){ if(values[j]==null){ok=false;break;} if(values[j]<m) m=values[j]; } out[i]=ok?m:null; }
-    return out;
-  }
-  function computeSMASafe(values, len){
-    const out = new Array(values.length).fill(null);
-    for (let i=len-1;i<values.length;i++){ let ok=true,s=0; for (let j=i-len+1;j<=i;j++){ if(values[j]==null){ok=false;break;} s+=values[j]; } out[i]=ok?s/len:null; }
-    return out;
-  }
-  function computeRSI(values, len){
-    const n = values.length;
-    const gains = new Array(n).fill(0), losses = new Array(n).fill(0);
-    for (let i=1;i<n;i++){ const diff = values[i]-values[i-1]; gains[i]=diff>0?diff:0; losses[i]=diff<0?-diff:0; }
-    const avgGain = computeRMA(gains, len), avgLoss = computeRMA(losses, len);
-    const rsi = new Array(n).fill(null);
-    for (let i=0;i<n;i++){
-      if (avgGain[i]==null||avgLoss[i]==null) continue;
-      if (avgLoss[i]===0){ rsi[i]=100; continue; }
-      rsi[i] = 100-(100/(1+avgGain[i]/avgLoss[i]));
-    }
-    return rsi;
-  }
-  function computeStochRSI(close, rsiLen, stochLen, kSmooth, dSmooth){
-    const rsi = computeRSI(close, rsiLen);
-    const rsiHighest = computeHighestSafe(rsi, stochLen), rsiLowest = computeLowestSafe(rsi, stochLen);
-    const stochRaw = rsi.map((v,i)=>{
-      if (v==null||rsiHighest[i]==null||rsiLowest[i]==null) return null;
-      const range = rsiHighest[i]-rsiLowest[i];
-      return range===0 ? 50 : ((v-rsiLowest[i])/range)*100;
-    });
-    const k = computeSMASafe(stochRaw, kSmooth);
-    const d = computeSMASafe(k, dSmooth);
-    return { k, d };
-  }
-
-  function evalSignalAt(sig, i, params){
-    const vLast = sig.sqzVal[i];
-    const adxLast = sig.adx[i];
-    const adxOk = adxLast!=null && adxLast >= params.adxThreshold;
-    const kLast = sig.stochK[i], kPrev = sig.stochK[i-1];
-    const dLast = sig.stochD[i], dPrev = sig.stochD[i-1];
-    const crossUp = kLast!=null&&dLast!=null&&kPrev!=null&&dPrev!=null && kLast>dLast && kPrev<=dPrev;
-    const crossDown = kLast!=null&&dLast!=null&&kPrev!=null&&dPrev!=null && kLast<dLast && kPrev>=dPrev;
-    const oversold = kLast!=null && kLast <= params.stochOS;
-    const overbought = kLast!=null && kLast >= params.stochOB;
-    const stochLongOk = kLast==null ? false : (params.requireCross ? (oversold && crossUp) : oversold);
-    const stochShortOk = kLast==null ? false : (params.requireCross ? (overbought && crossDown) : overbought);
-    return { adxOk, stochLongOk, stochShortOk, momentumBull: vLast!=null&&vLast>0, momentumBear: vLast!=null&&vLast<0 };
-  }
-
-  // ---------------- Proceso Cascada (idéntico a la app principal) ----------------
-  function buildCascadeTf(kl, stochParams){
-    const ema10 = computeEMA(kl.close, stochParams.emaFast);
-    const ema55 = computeEMA(kl.close, stochParams.emaSlow);
-    const sqz = computeSqueeze(kl.high, kl.low, kl.close, 20, 2, 20, 1.5);
-    const adx = computeADX(kl.high, kl.low, kl.close, 14).adx;
-    const stoch = computeStochRSI(kl.close, stochParams.stochRsiLen, stochParams.stochLen, stochParams.stochK, stochParams.stochD);
-    return { close: kl.close, ema10, ema55, sqzVal: sqz.val, adx, stochK: stoch.k, stochD: stoch.d };
-  }
-  function tfTrend(tf){
-    const n = tf.ema10.length;
-    const f = tf.ema10[n-1], s = tf.ema55[n-1];
-    if (f==null || s==null) return null;
-    return f>s ? 'bull' : f<s ? 'bear' : null;
-  }
-  function cascadeExhaustion(tf, dirBull, stochOS, stochOB){
-    const n = tf.close.length;
-    if (n<3) return false;
-    const sq0=tf.sqzVal[n-1], sq1=tf.sqzVal[n-2], sq2=tf.sqzVal[n-3];
-    const adx0=tf.adx[n-1], adx1=tf.adx[n-2];
-    const k0=tf.stochK[n-1], k1=tf.stochK[n-2];
-    if ([sq0,sq1,sq2,adx0,adx1,k0,k1].some(v=>v==null)) return false;
-    const sqFading = Math.abs(sq0) < Math.abs(sq1) && Math.abs(sq1) < Math.abs(sq2);
-    const adxFading = adx0 < adx1;
-    if (dirBull){ const touchedOS = k1<=stochOS || k0<=stochOS; return sqFading && adxFading && touchedOS && (k0>k1); }
-    else { const touchedOB = k1>=stochOB || k0>=stochOB; return sqFading && adxFading && touchedOB && (k0<k1); }
-  }
-  function cascadeConfirmed(tf, dirBull, stochOS, stochOB){
-    const n = tf.stochK.length;
-    if (n<3) return false;
-    const k0=tf.stochK[n-1], k1=tf.stochK[n-2], k2=tf.stochK[n-3];
-    const d0=tf.stochD[n-1], d1=tf.stochD[n-2];
-    if ([k0,k1,k2,d0,d1].some(v=>v==null)) return false;
-    if (dirBull){ const wasOS = k1<=stochOS || k2<=stochOS; return wasOS && (k1<=d1) && (k0>d0); }
-    else { const wasOB = k1>=stochOB || k2>=stochOB; return wasOB && (k1>=d1) && (k0<d0); }
-  }
-  function evalCascade(bundles, stochOS, stochOB){
-    const order = ['d1','h4','h1','m15','m5'];
-    const macroTrend = tfTrend(bundles.d1);
-    if (macroTrend==null) return { macroTrend:null, aligned:{}, depth:0 };
-    const dirBull = macroTrend==='bull';
-    const aligned = {};
-    for (const k of order) aligned[k] = tfTrend(bundles[k])===macroTrend;
-    let depth = 0, broke = null;
-    for (let idx=0; idx<order.length; idx++){
-      const k = order[idx];
-      if (!aligned[k]){ broke = k; break; }
-      depth = idx+1;
-      if (idx < order.length-1){
-        const exhausted = cascadeExhaustion(bundles[k], dirBull, stochOS, stochOB);
-        if (!exhausted){ broke = order[idx+1]; break; }
-      }
-    }
-    const confirmed5m = aligned.m5 && cascadeConfirmed(bundles.m5, dirBull, stochOS, stochOB);
-    const fullCascade = depth===5 && confirmed5m;
-    const partialPath = aligned.h1 && aligned.m15 && aligned.m5 && confirmed5m && !aligned.h4;
-    return { dirBull, macroTrend, aligned, fullCascade, partialPath };
-  }
-
+  // La página y el backtester importan el mismo motor de señales.
   // ==================== fetch ====================
   async function fetchKlinesClosed(symbol, interval, limit){
     const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit+1}`;
@@ -655,12 +420,11 @@
     if (!res.ok) throw new Error('HTTP '+res.status);
     const raw = await res.json();
     const closedRaw = raw.slice(0, -1);
-    return {
-      openTime: closedRaw.map(k=>k[0]),
-      high: closedRaw.map(k=>parseFloat(k[2])),
-      low: closedRaw.map(k=>parseFloat(k[3])),
-      close: closedRaw.map(k=>parseFloat(k[4])),
-    };
+    return closedRaw.map(k=>({
+      openTime: Number(k[0]), closeTime: Number(k[6]) + 1,
+      open: Number(k[1]), high: Number(k[2]), low: Number(k[3]),
+      close: Number(k[4]), volume: Number(k[5]),
+    }));
   }
   async function fetchTickerPrice(symbol){
     const url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`;
@@ -798,7 +562,7 @@
     $('statusText').textContent = 'escaneando señales…';
     try{
       const symbol = currentSymbol();
-      const params = {
+      const params = { ...V21_PARAMS,
         emaFast: parseInt($('emaFast').value)||10,
         emaSlow: parseInt($('emaSlow').value)||55,
         adxThreshold: parseFloat($('adxThreshold').value)||23,
@@ -809,12 +573,12 @@
         stochOS: parseFloat($('stochOS').value)||20,
         stochOB: parseFloat($('stochOB').value)||80,
         requireCross: $('requireCross').checked,
+        trendInterval: $('trendInterval').value,
+        signalInterval: $('signalInterval').value,
       };
-      const trendInterval = $('trendInterval').value;
-      const signalInterval = $('signalInterval').value;
 
       const limit = Math.min(1000, Math.max(params.emaSlow*6, 400));
-      const fixedIntervals = Array.from(new Set([...['1d','4h','1h','15m','5m','3m','1m'], trendInterval, signalInterval]));
+      const fixedIntervals = Object.keys(INTERVAL_MS);
       const klArr = await Promise.all(fixedIntervals.map(iv => fetchKlinesClosed(symbol, iv, limit)));
       const klMap = {};
       fixedIntervals.forEach((iv,idx)=>{ klMap[iv]=klArr[idx]; });
@@ -827,63 +591,16 @@
 
       const slotDirs = {}; // para logging de flancos
 
-      // --- Motor Principal ---
-      {
-        const trendKl = klMap[trendInterval], sigKl = klMap[signalInterval];
-        const efArr = computeEMA(trendKl.close, params.emaFast);
-        const esArr = computeEMA(trendKl.close, params.emaSlow);
-        const sqz = computeSqueeze(sigKl.high, sigKl.low, sigKl.close, 20, 2, 20, 1.5);
-        const adxRes = computeADX(sigKl.high, sigKl.low, sigKl.close, 14);
-        const stoch = computeStochRSI(sigKl.close, params.stochRsiLen, params.stochLen, params.stochK, params.stochD);
-        const sigBundle = { sqzVal: sqz.val, adx: adxRes.adx, stochK: stoch.k, stochD: stoch.d };
-        const i = sigKl.close.length-1;
-        const es = evalSignalAt(sigBundle, i, params);
-        const efLast = efArr[efArr.length-1], esLast = esArr[esArr.length-1];
-        const trendBull = efLast!=null && esLast!=null && efLast>esLast;
-        const trendBear = efLast!=null && esLast!=null && efLast<esLast;
-        let dir = 'NONE';
-        if (trendBull && es.momentumBull && es.adxOk && es.stochLongOk) dir='LONG';
-        else if (trendBear && es.momentumBear && es.adxOk && es.stochShortOk) dir='SHORT';
-        slotDirs['principal'] = { dir, kind:'Principal' };
+      // Una sola evaluación para la cuenta ficticia y las pruebas históricas.
+      const bundles = Object.fromEntries(fixedIntervals.map(iv => [iv, calculate(klMap[iv], params)]));
+      const { slots } = evaluate(bundles, Date.now(), params);
+      for (const slotKey of SLOT_PRIORITY){
+        const kind = slotKey === 'principal' ? 'Principal'
+          : slotKey === 'cascadeFull' ? 'Cascada completa (5 TF)'
+          : slotKey === 'cascadePartial' ? 'Cascada parcial (4H pendiente)'
+          : `Multi-TF ${slotKey.slice(6).toUpperCase()}`;
+        slotDirs[slotKey] = { dir: slots[slotKey] || 'NONE', kind };
       }
-
-      // --- Multi-TF (6) ---
-      for (const def of MULTI_TF_DEFS){
-        const eKl = klMap[def.entry], tKl = klMap[def.trend];
-        const efArr = computeEMA(tKl.close, params.emaFast);
-        const esArr = computeEMA(tKl.close, params.emaSlow);
-        const mSqz = computeSqueeze(eKl.high, eKl.low, eKl.close, 20, 2, 20, 1.5);
-        const mAdx = computeADX(eKl.high, eKl.low, eKl.close, 14);
-        const mStoch = computeStochRSI(eKl.close, params.stochRsiLen, params.stochLen, params.stochK, params.stochD);
-        const sigBundle = { sqzVal: mSqz.val, adx: mAdx.adx, stochK: mStoch.k, stochD: mStoch.d };
-        const i = eKl.close.length-1;
-        const es = evalSignalAt(sigBundle, i, params);
-        const efLast = efArr[efArr.length-1], esLast = esArr[esArr.length-1];
-        const trendBull = efLast!=null && esLast!=null && efLast>esLast;
-        const trendBear = efLast!=null && esLast!=null && efLast<esLast;
-        let dir = 'NONE';
-        if (trendBull && es.momentumBull && es.adxOk && es.stochLongOk) dir='LONG';
-        else if (trendBear && es.momentumBear && es.adxOk && es.stochShortOk) dir='SHORT';
-        slotDirs['multi:'+def.entry] = { dir, kind:`Multi-TF ${def.label} (Tend. ${def.trend.toUpperCase()})` };
-      }
-
-      // --- Cascada (2 estados) ---
-      {
-        const stochParams = { emaFast: params.emaFast, emaSlow: params.emaSlow, stochRsiLen: params.stochRsiLen, stochLen: params.stochLen, stochK: params.stochK, stochD: params.stochD };
-        const bundles = {
-          d1: buildCascadeTf(klMap['1d'], stochParams),
-          h4: buildCascadeTf(klMap['4h'], stochParams),
-          h1: buildCascadeTf(klMap['1h'], stochParams),
-          m15: buildCascadeTf(klMap['15m'], stochParams),
-          m5: buildCascadeTf(klMap['5m'], stochParams),
-        };
-        const casc = evalCascade(bundles, params.stochOS, params.stochOB);
-        const fullDir = casc.fullCascade ? (casc.dirBull?'LONG':'SHORT') : 'NONE';
-        const partialDir = casc.partialPath ? (casc.dirBull?'LONG':'SHORT') : 'NONE';
-        slotDirs['cascadeFull'] = { dir: fullDir, kind:'Cascada completa (5 TF)' };
-        slotDirs['cascadePartial'] = { dir: partialDir, kind:'Cascada parcial (4H pendiente)' };
-      }
-
       // --- selección por prioridad: solo 1 operación en toda la cuenta ---
       // Si no hay posición abierta, se abre con la ranura de MAYOR prioridad que esté
       // señalando en esta ronda (SLOT_PRIORITY, de más a menos confirmada). El resto de

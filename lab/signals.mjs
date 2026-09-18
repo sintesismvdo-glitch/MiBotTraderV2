@@ -11,7 +11,11 @@ export const DEFAULT_PARAMS = Object.freeze({
   emaFast: 10, emaSlow: 55, adxThreshold: 23, stochRsiLen: 14,
   stochLen: 14, stochK: 3, stochD: 3, stochOS: 20, stochOB: 80,
   requireCross: true, trendInterval: '1d', signalInterval: '4h', dmiFilter: false,
+  oneMinuteAlignment: false,
 });
+// V2.1 activates only the V4 conditions whose meaning is already explicit.
+// Slopes and EMA extension are measured below, but have no invented thresholds.
+export const V21_PARAMS = Object.freeze({ ...DEFAULT_PARAMS, dmiFilter: true, oneMinuteAlignment: true });
 
 export function resample(bars, intervalMs) {
   const result = [];
@@ -78,6 +82,21 @@ function confirmed(bundle, i, dir, params) {
     : (bundle.k[i-1] >= params.stochOB || bundle.k[i-2] >= params.stochOB) && bundle.k[i-1] >= bundle.d[i-1] && bundle.k[i] < bundle.d[i];
 }
 
+export function diagnose(bundle, i, params = DEFAULT_PARAMS) {
+  if (i < 0) return null;
+  const delta = key => i > 0 && bundle[key][i] != null && bundle[key][i - 1] != null
+    ? bundle[key][i] - bundle[key][i - 1] : null;
+  const close = bundle.bars[i]?.close;
+  const distance = key => close > 0 && bundle[key][i] != null
+    ? 100 * (close / bundle[key][i] - 1) : null;
+  return {
+    adxSlope: delta('adx'), sqzSlope: delta('sqz'),
+    ema10DistancePct: distance('fast'), ema55DistancePct: distance('slow'),
+    exhaustionLong: exhaustion(bundle, i, 'LONG', params),
+    exhaustionShort: exhaustion(bundle, i, 'SHORT', params),
+  };
+}
+
 export function evaluate(bundles, time, params = DEFAULT_PARAMS) {
   const index = Object.fromEntries(Object.entries(bundles).map(([tf, b]) => [tf, atOrBefore(b, time)]));
   const slots = {};
@@ -86,7 +105,9 @@ export function evaluate(bundles, time, params = DEFAULT_PARAMS) {
   slots.principal = mainSig === mainTrend ? mainSig : 'NONE';
   for (const { entry, trend: trendTf } of MULTI) {
     const s = signal(bundles[entry], index[entry], params);
-    slots[`multi:${entry}`] = s === trend(bundles[trendTf], index[trendTf]) ? s : 'NONE';
+    const aligned = entry !== '1m' || !params.oneMinuteAlignment ||
+      (s === trend(bundles['3m'], index['3m']) && s === trend(bundles['5m'], index['5m']));
+    slots[`multi:${entry}`] = aligned && s === trend(bundles[trendTf], index[trendTf]) ? s : 'NONE';
   }
   const chain = ['1d', '4h', '1h', '15m', '5m'];
   const dir = trend(bundles['1d'], index['1d']);
@@ -100,4 +121,3 @@ export function evaluate(bundles, time, params = DEFAULT_PARAMS) {
   slots.cascadePartial = partial ? dir : 'NONE';
   return { slots, index };
 }
-

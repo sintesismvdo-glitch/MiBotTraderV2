@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { runInNewContext, Script } from 'node:vm';
-import { runBacktest, validateBars } from '../lab/backtest.mjs';
-import { atOrBefore, calculate, resample } from '../lab/signals.mjs';
-import { adx, ema, squeeze, stochRsi } from '../lab/indicators.mjs';
+import { Script } from 'node:vm';
+import { spawnSync } from 'node:child_process';
+import { runBacktest, summarize, validateBars } from '../lab/backtest.mjs';
+import { V21_PARAMS, atOrBefore, calculate, diagnose, evaluate, resample } from '../lab/signals.mjs';
 
 const minute = 60000;
 function bars(prices) {
@@ -61,39 +61,54 @@ test('funding is charged to a long held at funding time', () => {
   assert.equal(result.finalEquity, 99999);
 });
 
-test('laboratory indicators match the published browser formulas', () => {
+test('browser imports the same signal engine and contains no second indicator implementation', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  const start = html.indexOf('  function computeSMA(');
-  const end = html.indexOf('  function evalSignalAt(', start);
-  assert.ok(start > 0 && end > start);
-  const old = runInNewContext(`${html.slice(start, end)}; ({computeEMA, computeADX, computeSqueeze, computeStochRSI})`);
-  const close = Array.from({ length: 240 }, (_, i) => 100 + i * 0.04 + Math.sin(i / 4) * 2 + Math.cos(i / 11));
-  const high = close.map((c, i) => c + 1 + i % 3 * 0.05);
-  const low = close.map((c, i) => c - 1 - i % 4 * 0.03);
-  const compare = (a, b) => {
-    assert.equal(a.length, b.length);
-    for (let i = 0; i < a.length; i++) {
-      if (a[i] == null || b[i] == null) assert.equal(a[i], b[i], `index ${i}`);
-      else assert.ok(Math.abs(a[i] - b[i]) < 1e-8, `index ${i}: ${a[i]} vs ${b[i]}`);
-    }
-  };
-  compare(ema(close, 55), old.computeEMA(close, 55));
-  const baselineAdx = old.computeADX(high, low, close, 14);
-  const labAdx = adx(high, low, close, 14);
-  compare(labAdx.adx, baselineAdx.adx);
-  compare(labAdx.plusDI, baselineAdx.plusDI);
-  compare(labAdx.minusDI, baselineAdx.minusDI);
-  compare(squeeze(high, low, close), old.computeSqueeze(high, low, close, 20, 2, 20, 1.5).val);
-  const oldStoch = old.computeStochRSI(close, 14, 14, 3, 3);
-  const newStoch = stochRsi(close, 14, 14, 3, 3);
-  compare(newStoch.k, oldStoch.k);
-  compare(newStoch.d, oldStoch.d);
-});
-
-test('browser scripts remain syntactically valid', () => {
-  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.match(html, /<script type="module">\s*import \{[^}]*calculate, evaluate \} from '\.\/lab\/signals\.mjs'/);
+  assert.doesNotMatch(html, /function compute(?:EMA|ADX|Squeeze|StochRSI)/);
+  const scripts = [...html.matchAll(/<script(?: type="module")?>([\s\S]*?)<\/script>/g)];
   assert.equal(scripts.length, 2);
-  for (const [i, match] of scripts.entries()) new Script(match[1], { filename: `inline-${i}.js` });
+  new Script(scripts[0][1], { filename: 'ui.js' });
+  const check = spawnSync(process.execPath, ['--input-type=module', '--check'], { input: scripts[1][1], encoding: 'utf8' });
+  assert.equal(check.status, 0, check.stderr);
 });
 
+test('1m V2.1 signal needs aligned 3m and 5m trends', () => {
+  const make = (fast, slow) => ({
+    bars: [{ closeTime: minute, close: 100 }, { closeTime: 2 * minute, close: 101 }],
+    fast: [fast, fast], slow: [slow, slow], sqz: [1, 1],
+    adx: [30, 30], plusDI: [25, 25], minusDI: [10, 10],
+    k: [5, 15], d: [10, 10],
+  });
+  const tf = Object.fromEntries(['1m', '3m', '5m', '15m', '1h', '4h', '1d'].map(x => [x, make(2, 1)]));
+  tf['5m'] = make(1, 2);
+  assert.equal(evaluate(tf, 2 * minute, V21_PARAMS).slots['multi:1m'], 'NONE');
+  tf['5m'] = make(2, 1);
+  assert.equal(evaluate(tf, 2 * minute, V21_PARAMS).slots['multi:1m'], 'LONG');
+  assert.equal(evaluate(tf, 2 * minute, { ...V21_PARAMS, oneMinuteAlignment: false }).slots['multi:1m'], 'LONG');
+});
+
+test('V4 measurements expose slopes, extension and exhaustion without hidden thresholds', () => {
+  const bundle = { bars: [{ close: 100 }, { close: 105 }, { close: 110 }],
+    fast: [100, 102, 105], slow: [99, 100, 101],
+    adx: [30, 29, 28], sqz: [8, 6, 4], k: [10, 12, 14] };
+  const d = diagnose(bundle, 2);
+  assert.equal(d.adxSlope, -1);
+  assert.equal(d.sqzSlope, -2);
+  assert.ok(d.ema10DistancePct > 0);
+  assert.ok(d.ema55DistancePct > d.ema10DistancePct);
+  assert.equal(d.exhaustionLong, true);
+});
+
+test('summary separates LONG/SHORT and each executed slot', () => {
+  const trades = [
+    { dir: 'LONG', slot: 'principal', netPnl: 20, fees: 1, fundingPnl: 0 },
+    { dir: 'LONG', slot: 'principal', netPnl: -10, fees: 1, fundingPnl: 0 },
+    { dir: 'SHORT', slot: 'multi:1m', netPnl: -5, fees: 1, fundingPnl: 0 },
+  ];
+  const s = summarize({ trades, equity: [{ equity: 100000 }, { equity: 100005 }], finalEquity: 100005 });
+  assert.equal(s.bySide.LONG.trades, 2);
+  assert.equal(s.bySide.LONG.profitFactor, 2);
+  assert.equal(s.bySide.SHORT.expectancyUsdt, -5);
+  assert.equal(s.bySlot.principal.trades, 2);
+  assert.equal(s.bySlot['multi:1m'].netPnl, -5);
+});
