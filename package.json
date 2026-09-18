@@ -1,0 +1,12 @@
+{
+  "name": "mibottrader-lab",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "backtest": "node scripts/backtest.mjs",
+    "download": "node scripts/download-btc.mjs",
+    "compare": "node scripts/compare.mjs"
+  }
+}
+

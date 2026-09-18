@@ -152,7 +152,7 @@
     <div class="statusbar-inner">
       <div class="brand">
         <span class="brand-name">Mi Bot Trader</span>
-        <span class="brand-version">v3.4.1 Algorithmic</span>
+        <span class="brand-version">v3.4.2 BTC Lab</span>
       </div>
       <span class="sim-badge">⚠ Cuenta ficticia — no ejecuta órdenes reales</span>
       <div class="api-cluster">
@@ -182,7 +182,7 @@
     <!-- 4.3 Monitor Táctico de Posiciones Abiertas -->
     <div class="section">
       <h2>Monitor Táctico de Posiciones</h2>
-      <div class="hint">ranura única · BTC+ETH siempre · DOGE solo en SHORT · 10x aislado</div>
+      <div class="hint">ranura única · BTCUSDT perpetual · 10x simulado · P&L bruto sin comisiones ni funding</div>
       <div class="rule-chips">
         <span class="rule-chip tp">TP <b>+25%</b></span>
         <span class="rule-chip sl">SL <b>−20%</b></span>
@@ -285,7 +285,7 @@
   async function pingLatency(){
     const t0 = performance.now();
     try{
-      await fetch('https://api.binance.com/api/v3/time', { cache:'no-store' });
+      await fetch('https://fapi.binance.com/fapi/v1/time', { cache:'no-store' });
       const ms = Math.round(performance.now()-t0);
       const el = $('latencyItem');
       if (el) el.textContent = `· lat. ${ms}ms`;
@@ -330,16 +330,15 @@
   // ==================== constantes de la cuenta ficticia ====================
   const START_BALANCE = 100000;
   const MARGIN_PER_TRADE = 100;
-  const MARGIN_DOGE = 50;    // DOGE solo si SHORT, con 50 USDT de margen
   const LEVERAGE = 10;
   const SL_PCT = -20;   // sobre margen
   const TP_PCT = 25;    // sobre margen
   const BE_TRIGGER_PCT = 10; // sobre margen — a partir de acá, stop se mueve a 0% (breakeven)
 
-  const ACCOUNT_KEY = 'mibottrader_account_v1';
-  const SLOT_STATE_KEY = 'mibottrader_slot_state_v1';
+  const ACCOUNT_KEY = 'mibottrader_btc_account_v2';
+  const SLOT_STATE_KEY = 'mibottrader_btc_slot_state_v2';
 
-  // slots: 1 Principal + 6 Multi-TF + 3 estados de Cascada = 10 (= 1000/100, a propósito)
+  // 1 motor principal, 6 Multi-TF y 2 estados de cascada.
   const MULTI_TF_DEFS = [
     { entry:'4h',  trend:'1d', label:'4H'  },
     { entry:'1h',  trend:'1d', label:'1H'  },
@@ -352,7 +351,7 @@
   // Orden de prioridad para decidir CUÁL ranura se lleva la única posición disponible,
   // cuando varias señalan en la misma ronda: de la confirmación más sólida a la más liviana.
   const SLOT_PRIORITY = [
-    'cascadeFull', 'cascadePartial', 'cascadeConfirm4h', 'principal',
+    'cascadeFull', 'cascadePartial', 'principal',
     'multi:4h', 'multi:1h', 'multi:15m', 'multi:5m', 'multi:3m', 'multi:1m',
   ];
 
@@ -592,8 +591,8 @@
 
   // ---------------- Proceso Cascada (idéntico a la app principal) ----------------
   function buildCascadeTf(kl, stochParams){
-    const ema10 = computeEMA(kl.close, 10);
-    const ema55 = computeEMA(kl.close, 55);
+    const ema10 = computeEMA(kl.close, stochParams.emaFast);
+    const ema55 = computeEMA(kl.close, stochParams.emaSlow);
     const sqz = computeSqueeze(kl.high, kl.low, kl.close, 20, 2, 20, 1.5);
     const adx = computeADX(kl.high, kl.low, kl.close, 14).adx;
     const stoch = computeStochRSI(kl.close, stochParams.stochRsiLen, stochParams.stochLen, stochParams.stochK, stochParams.stochD);
@@ -651,7 +650,7 @@
 
   // ==================== fetch ====================
   async function fetchKlinesClosed(symbol, interval, limit){
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit+1}`;
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit+1}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error('HTTP '+res.status);
     const raw = await res.json();
@@ -664,7 +663,7 @@
     };
   }
   async function fetchTickerPrice(symbol){
-    const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+    const url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error('HTTP '+res.status);
     const data = await res.json();
@@ -680,13 +679,7 @@
     return FIXED_SYMBOL;
   }
 
-  // ==================== multi-par: BTC siempre, ETH siempre, DOGE solo si SHORT ====================
-  // Cuando una señal dispara:
-  // - Si LONG: abre en BTC (100 USDT) + ETH (100 USDT) = 200 USDT de margen
-  // - Si SHORT: abre en BTC (100 USDT) + ETH (100 USDT) + DOGE (50 USDT) = 250 USDT de margen
-  const SYMBOLS_LONG = ['BTCUSDT', 'ETHUSDT'];
-  const SYMBOLS_SHORT = ['BTCUSDT', 'ETHUSDT', 'DOGEUSDT'];
-  const SYMBOL_MARGIN = { BTCUSDT: 100, ETHUSDT: 100, DOGEUSDT: 50 };
+  const SYMBOL_MARGIN = { BTCUSDT: MARGIN_PER_TRADE };
 
   // ==================== historial (auditoría) ====================
   function addHistoryEntry(entry){
@@ -699,18 +692,16 @@
 
   // ==================== apertura / cierre de posiciones ====================
   // Restricción GLOBAL: como máximo 1 operación abierta a la vez en toda la cuenta.
-  // Una operación puede incluir múltiples símbolos:
-  // - LONG: BTC (100) + ETH (100) = 200 USDT de margen
-  // - SHORT: BTC (100) + ETH (100) + DOGE (50) = 250 USDT de margen
+  // Una operación abre solo BTCUSDT.
   function tryOpenPositions(slotKey, kindLabel, dir, livePrice){
     if (account.openPositions.length > 0){
-      addHistoryEntry({ type:'SEÑAL', dir, symbol:'BTC/ETH/DOGE', kind:kindLabel, estado:'Ya hay una posición abierta' });
+      addHistoryEntry({ type:'SEÑAL', dir, symbol:'BTCUSDT', kind:kindLabel, estado:'Ya hay una posición abierta' });
       return false;
     }
-    const symbolsToOpen = dir==='LONG' ? SYMBOLS_LONG : SYMBOLS_SHORT;
+    const symbolsToOpen = ['BTCUSDT'];
     const requiredMargin = symbolsToOpen.reduce((sum, sym) => sum + SYMBOL_MARGIN[sym], 0);
     if (account.cashBalance < requiredMargin){
-      addHistoryEntry({ type:'SEÑAL', dir, symbol:'BTC/ETH/DOGE', kind:kindLabel, estado:'Sin capital disponible' });
+      addHistoryEntry({ type:'SEÑAL', dir, symbol:'BTCUSDT', kind:kindLabel, estado:'Sin capital disponible' });
       return false;
     }
     account.cashBalance = +(account.cashBalance - requiredMargin).toFixed(4);
@@ -738,9 +729,7 @@
     const marginPct = ((pos.dir==='LONG') ? (exitPrice-pos.entryPrice)/pos.entryPrice : (pos.entryPrice-exitPrice)/pos.entryPrice) * LEVERAGE * 100;
     const pnlUsdt = +(pos.margin * marginPct/100).toFixed(4);
     account.cashBalance = +(account.cashBalance + pos.margin + pnlUsdt).toFixed(4);
-    // Cada pata (BTC/ETH/DOGE) cierra de forma INDEPENDIENTE por su propio id — entran
-    // juntas como una operación, pero cada una sigue su propio SL/TP/Breakeven según su
-    // propio precio. Solo se quita esta pata del array, no las demás de la misma operación.
+    // La única posición BTC se retira al cerrar.
     account.openPositions = account.openPositions.filter(p=>p.id!==pos.id);
     saveAccount();
     addHistoryEntry({
@@ -801,7 +790,7 @@
     renderSummary(prices);
   }
 
-  // ==================== escaneo completo de señales (10 ranuras) — cada 60s ====================
+  // ==================== escaneo completo de señales (9 ranuras) — cada 60s ====================
   async function runSignalScan(){
     if (busyScan) return;
     busyScan = true;
@@ -830,9 +819,9 @@
       const klMap = {};
       fixedIntervals.forEach((iv,idx)=>{ klMap[iv]=klArr[idx]; });
       
-      // Obtener precios de BTC, ETH, DOGE para poder operar en múltiples pares
+      // Precio BTC perpetual para la única posición simulada.
       const livePrice = {};
-      await Promise.all(['BTCUSDT', 'ETHUSDT', 'DOGEUSDT'].map(async sym => {
+      await Promise.all(['BTCUSDT'].map(async sym => {
         livePrice[sym] = await fetchTickerPrice(sym);
       }));
 
@@ -851,9 +840,10 @@
         const es = evalSignalAt(sigBundle, i, params);
         const efLast = efArr[efArr.length-1], esLast = esArr[esArr.length-1];
         const trendBull = efLast!=null && esLast!=null && efLast>esLast;
+        const trendBear = efLast!=null && esLast!=null && efLast<esLast;
         let dir = 'NONE';
         if (trendBull && es.momentumBull && es.adxOk && es.stochLongOk) dir='LONG';
-        else if (!trendBull && es.momentumBear && es.adxOk && es.stochShortOk) dir='SHORT';
+        else if (trendBear && es.momentumBear && es.adxOk && es.stochShortOk) dir='SHORT';
         slotDirs['principal'] = { dir, kind:'Principal' };
       }
 
@@ -870,15 +860,16 @@
         const es = evalSignalAt(sigBundle, i, params);
         const efLast = efArr[efArr.length-1], esLast = esArr[esArr.length-1];
         const trendBull = efLast!=null && esLast!=null && efLast>esLast;
+        const trendBear = efLast!=null && esLast!=null && efLast<esLast;
         let dir = 'NONE';
         if (trendBull && es.momentumBull && es.adxOk && es.stochLongOk) dir='LONG';
-        else if (!trendBull && es.momentumBear && es.adxOk && es.stochShortOk) dir='SHORT';
+        else if (trendBear && es.momentumBear && es.adxOk && es.stochShortOk) dir='SHORT';
         slotDirs['multi:'+def.entry] = { dir, kind:`Multi-TF ${def.label} (Tend. ${def.trend.toUpperCase()})` };
       }
 
-      // --- Cascada (3 estados) ---
+      // --- Cascada (2 estados) ---
       {
-        const stochParams = { stochRsiLen: params.stochRsiLen, stochLen: params.stochLen, stochK: params.stochK, stochD: params.stochD };
+        const stochParams = { emaFast: params.emaFast, emaSlow: params.emaSlow, stochRsiLen: params.stochRsiLen, stochLen: params.stochLen, stochK: params.stochK, stochD: params.stochD };
         const bundles = {
           d1: buildCascadeTf(klMap['1d'], stochParams),
           h4: buildCascadeTf(klMap['4h'], stochParams),
@@ -889,10 +880,8 @@
         const casc = evalCascade(bundles, params.stochOS, params.stochOB);
         const fullDir = casc.fullCascade ? (casc.dirBull?'LONG':'SHORT') : 'NONE';
         const partialDir = casc.partialPath ? (casc.dirBull?'LONG':'SHORT') : 'NONE';
-        const confirm4hDir = (casc.partialPath && casc.aligned && casc.aligned.h4) ? (casc.dirBull?'LONG':'SHORT') : 'NONE';
         slotDirs['cascadeFull'] = { dir: fullDir, kind:'Cascada completa (5 TF)' };
         slotDirs['cascadePartial'] = { dir: partialDir, kind:'Cascada parcial (4H pendiente)' };
-        slotDirs['cascadeConfirm4h'] = { dir: confirm4hDir, kind:'Confirmación 4H (se sumó a la parcial)' };
       }
 
       // --- selección por prioridad: solo 1 operación en toda la cuenta ---
@@ -906,14 +895,14 @@
         const { dir, kind } = slotDirs[slotKey];
         const prevDir = slotPrevDir[slotKey] || 'NONE';
         const isNewEdge = dir!=='NONE' && dir!==prevDir;
-        if (dir!=='NONE' && noPositionOpen && !opened){
-          // primera vez que capacidad está libre: se abre acá, sea o no un flanco nuevo
+        if (isNewEdge && noPositionOpen && !opened){
+          // Solo una señal nueva puede abrir una operación.
           const success = tryOpenPositions(slotKey, kind, dir, livePrice);
           if (success){ opened = true; }
         } else if (isNewEdge){
           // señal nueva pero no se pudo operar (prioridad menor esta ronda, o ya hay posición)
           const estado = opened ? 'Prioridad menor esta ronda' : 'Ya hay una posición abierta';
-          addHistoryEntry({ type:'SEÑAL', dir, symbol:'BTC/ETH/DOGE', kind, estado });
+          addHistoryEntry({ type:'SEÑAL', dir, symbol:'BTCUSDT', kind, estado });
         }
         slotPrevDir[slotKey] = dir;
       }
