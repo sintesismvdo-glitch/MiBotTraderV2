@@ -1,0 +1,141 @@
+//@version=6
+strategy("MiBotTrader V2.1 BTC · espejo experimental", overlay = true,
+     initial_capital = 100000, pyramiding = 0,
+     commission_type = strategy.commission.percent, commission_value = 0.05,
+     margin_long = 10, margin_short = 10, slippage = 0,
+     process_orders_on_close = false, calc_on_every_tick = false)
+
+// Usar únicamente en BINANCE:BTCUSDT.P, gráfico normal de 1 minuto.
+// La traducción de señales es V2.1, no un clon del simulador de ejecución JS.
+if timeframe.in_seconds(timeframe.period) != 60
+    runtime.error("Selecciona el gráfico de 1 minuto.")
+if syminfo.prefix != "BINANCE" or syminfo.ticker != "BTCUSDT.P"
+    runtime.error("Selecciona BINANCE:BTCUSDT.P (perpetual), no BTC spot.")
+
+f_ema(float src, int length) =>
+    float seed = ta.sma(src, length)
+    float result = na
+    result := na(result[1]) ? seed : src * (2.0 / (length + 1)) + result[1] * (1.0 - 2.0 / (length + 1))
+    result
+
+// Devuelve tendencia, señal, agotamiento y confirmación en el TF evaluado.
+// Los umbrales son los de V2.1: EMA 10/55, ADX 23, StochRSI 14/14/3/3.
+f_state() =>
+    float fast = f_ema(close, 10)
+    float slow = f_ema(close, 55)
+    int trend = na(fast) or na(slow) ? 0 : fast > slow ? 1 : fast < slow ? -1 : 0
+
+    float change = na(close[1]) ? 0.0 : close - close[1]
+    float gain = ta.rma(math.max(change, 0.0), 14)
+    float loss = ta.rma(math.max(-change, 0.0), 14)
+    float rsi = na(gain) or na(loss) ? na : loss == 0 ? 100.0 : 100.0 - 100.0 / (1.0 + gain / loss)
+    float rsiHi = ta.highest(rsi, 14)
+    float rsiLo = ta.lowest(rsi, 14)
+    float raw = not na(rsi[13]) and not na(rsiHi) and not na(rsiLo) ? (rsiHi == rsiLo ? 50.0 : 100.0 * (rsi - rsiLo) / (rsiHi - rsiLo)) : na
+    float kAvg = ta.sma(raw, 3)
+    float k = not na(raw[2]) ? kAvg : na
+    float dAvg = ta.sma(k, 3)
+    float d = not na(k[2]) ? dAvg : na
+
+    float up = na(high[1]) ? 0.0 : high - high[1]
+    float down = na(low[1]) ? 0.0 : low[1] - low
+    float tr = na(close[1]) ? high - low : math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+    float atr = ta.rma(tr, 14)
+    float pDm = ta.rma(up > down and up > 0 ? up : 0.0, 14)
+    float mDm = ta.rma(down > up and down > 0 ? down : 0.0, 14)
+    float pDi = not na(atr) and atr != 0 ? 100.0 * pDm / atr : na
+    float mDi = not na(atr) and atr != 0 ? 100.0 * mDm / atr : na
+    float diSum = pDi + mDi
+    float dx = not na(diSum) ? (diSum == 0 ? 0.0 : 100.0 * math.abs(pDi - mDi) / diSum) : na
+    float adx = ta.rma(dx, 14)
+
+    float source = close - ((ta.highest(high, 20) + ta.lowest(low, 20)) / 2.0 + ta.sma(close, 20)) / 2.0
+    float sqz = ta.linreg(source, 20, 0)
+    bool crossUp = not na(k[1]) and not na(d[1]) and k > d and k[1] <= d[1]
+    bool crossDown = not na(k[1]) and not na(d[1]) and k < d and k[1] >= d[1]
+    int sig = 0
+    if not na(adx) and adx >= 23 and sqz > 0 and pDi > mDi and k <= 20 and crossUp
+        sig := 1
+    else if not na(adx) and adx >= 23 and sqz < 0 and mDi > pDi and k >= 80 and crossDown
+        sig := -1
+
+    bool fading = not na(sqz[2]) and math.abs(sqz) < math.abs(sqz[1]) and math.abs(sqz[1]) < math.abs(sqz[2]) and not na(adx[1]) and adx < adx[1]
+    bool exLong = fading and (k[1] <= 20 or k <= 20) and k > k[1]
+    bool exShort = fading and (k[1] >= 80 or k >= 80) and k < k[1]
+    bool coLong = not na(k[2]) and (k[1] <= 20 or k[2] <= 20) and k[1] <= d[1] and k > d
+    bool coShort = not na(k[2]) and (k[1] >= 80 or k[2] >= 80) and k[1] >= d[1] and k < d
+    [trend, sig, exLong, exShort, coLong, coShort]
+
+// En marcos superiores, solo valores de la vela anterior ya cerrada.
+// Esta decisión evita repaint, aunque retrasa la señal frente al motor de 1m.
+f_closed_state() =>
+    [t, s, el, es, cl, cs] = f_state()
+    [t[1], s[1], el[1], es[1], cl[1], cs[1]]
+
+[dT, dS, dEL, dES, dCL, dCS] = request.security(syminfo.tickerid, "1D", f_closed_state(), lookahead = barmerge.lookahead_on)
+[h4T, h4S, h4EL, h4ES, h4CL, h4CS] = request.security(syminfo.tickerid, "240", f_closed_state(), lookahead = barmerge.lookahead_on)
+[h1T, h1S, h1EL, h1ES, h1CL, h1CS] = request.security(syminfo.tickerid, "60", f_closed_state(), lookahead = barmerge.lookahead_on)
+[m15T, m15S, m15EL, m15ES, m15CL, m15CS] = request.security(syminfo.tickerid, "15", f_closed_state(), lookahead = barmerge.lookahead_on)
+[m5T, m5S, m5EL, m5ES, m5CL, m5CS] = request.security(syminfo.tickerid, "5", f_closed_state(), lookahead = barmerge.lookahead_on)
+[m3T, m3S, m3EL, m3ES, m3CL, m3CS] = request.security(syminfo.tickerid, "3", f_closed_state(), lookahead = barmerge.lookahead_on)
+[m1T, m1S, m1EL, m1ES, m1CL, m1CS] = f_state()
+
+int macro = nz(dT, 0)
+bool fullLong = macro == 1 and h4T == 1 and h1T == 1 and m15T == 1 and m5T == 1 and dEL and h4EL and h1EL and m15EL and m5CL
+bool fullShort = macro == -1 and h4T == -1 and h1T == -1 and m15T == -1 and m5T == -1 and dES and h4ES and h1ES and m15ES and m5CS
+bool partialLong = macro == 1 and h4T != 1 and h1T == 1 and m15T == 1 and m5T == 1 and m5CL
+bool partialShort = macro == -1 and h4T != -1 and h1T == -1 and m15T == -1 and m5T == -1 and m5CS
+
+int full = fullLong ? 1 : fullShort ? -1 : 0
+int partial = partialLong ? 1 : partialShort ? -1 : 0
+int principal = h4S == macro ? nz(h4S, 0) : 0
+int multi4h = h4S == macro ? nz(h4S, 0) : 0
+int multi1h = h1S == macro ? nz(h1S, 0) : 0
+int multi15m = m15S == h4T ? nz(m15S, 0) : 0
+int multi5m = m5S == h4T ? nz(m5S, 0) : 0
+int multi3m = m3S == h1T ? nz(m3S, 0) : 0
+int multi1m = m1S == h1T and m1S == m3T and m1S == m5T ? nz(m1S, 0) : 0
+
+// Prioridad única: cascadas, principal, 4h, 1h, 15m, 5m, 3m, 1m.
+// Una señal cuenta solamente al pasar de NONE a LONG/SHORT o cambiar de dirección.
+array<int> dirs = array.from(full, partial, principal, multi4h, multi1h, multi15m, multi5m, multi3m, multi1m)
+array<string> names = array.from("Cascada completa", "Cascada parcial", "Principal",
+     "Multi 4H", "Multi 1H", "Multi 15m", "Multi 5m", "Multi 3m", "Multi 1m")
+var array<int> previous = array.new_int(9, 0)
+int chosen = 0
+string chosenSlot = ""
+if barstate.isconfirmed
+    for i = 0 to 8
+        int direction = array.get(dirs, i)
+        if chosen == 0 and strategy.position_size == 0 and direction != 0 and direction != array.get(previous, i)
+            chosen := direction
+            chosenSlot := array.get(names, i)
+        array.set(previous, i, direction)
+
+// 100 USDT de margen x 10 = 1000 USDT nocionales.
+// Los stops iniciales se colocan desde el cierre de señal; se actualizan al
+// precio real de entrada tras el fill. No son fills idénticos al laboratorio.
+float quantity = 1000.0 / (close * syminfo.pointvalue)
+if chosen == 1 and quantity > 0
+    strategy.entry("LONG", strategy.long, qty = quantity, comment = chosenSlot)
+    strategy.exit("Salida LONG", "LONG", stop = close * 0.98, limit = close * 1.025)
+if chosen == -1 and quantity > 0
+    strategy.entry("SHORT", strategy.short, qty = quantity, comment = chosenSlot)
+    strategy.exit("Salida SHORT", "SHORT", stop = close * 1.02, limit = close * 0.975)
+
+var bool breakeven = false
+if strategy.position_size == 0
+    breakeven := false
+if strategy.position_size > 0
+    float entry = strategy.position_avg_price
+    strategy.exit("Salida LONG", "LONG", stop = breakeven ? entry : entry * 0.98, limit = entry * 1.025)
+    if high >= entry * 1.01
+        breakeven := true
+if strategy.position_size < 0
+    float entry = strategy.position_avg_price
+    strategy.exit("Salida SHORT", "SHORT", stop = breakeven ? entry : entry * 1.02, limit = entry * 0.975)
+    if low <= entry * 0.99
+        breakeven := true
+
+plotshape(chosen == 1, title = "Señal LONG", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.tiny)
+plotshape(chosen == -1, title = "Señal SHORT", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny)

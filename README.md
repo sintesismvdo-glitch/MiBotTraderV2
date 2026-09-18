@@ -27,6 +27,14 @@ node scripts/compare.mjs data/btcusdt-perp.json comparison-result.json
 
 Las fechas son UTC; el segundo día es exclusivo. `--use-system-ca` permite usar los certificados del sistema en este entorno Windows. Los datos e informes están excluidos de Git para evitar publicar archivos grandes. Cada informe contiene SHA-256 del archivo de datos para identificar el conjunto analizado.
 
+## Probar señales en TradingView
+
+El borrador experimental [`tradingview/MiBotTraderV2_1_BTC.pine`](tradingview/MiBotTraderV2_1_BTC.pine) es una **estrategia Pine v6** para el Strategy Report. En TradingView abre `BINANCE:BTCUSDT.P` en velas normales de **1 minuto** (no Heikin Ashi), abre Pine Editor, crea una estrategia nueva, sustituye su contenido por el archivo y pulsa **Add to chart / Añadir al gráfico**. Los comentarios de cada entrada identifican la ranura que ganó la prioridad. No publica un bot de órdenes reales.
+
+Pine traduce la lógica de señales V2.1, pero **no comparte código ejecutable** con JavaScript. Para los marcos superiores usa la última vela confirmada con desplazamiento de una vela y `lookahead_on`, lo que evita usar datos futuros pero puede retrasar una señal un minuto respecto al laboratorio. Su emulador de órdenes puede diferir en aperturas con gap, orden intravela TP/SL y activación de breakeven. Fija una comisión hipotética de 0,05 % por lado, margen 10 % y nocional aproximado de 1.000 USDT; deja slippage en cero y no incluye funding histórico. Los límites de barras disponibles en tu plan de TradingView pueden impedir cubrir los mismos seis meses a 1m. **No compares su PF directamente con el JSON del laboratorio.**
+
+Este archivo todavía **no se ha compilado en una cuenta de TradingView**. Si el editor muestra un error, conserva el número de línea y el mensaje para corregirlo antes de interpretar cualquier resultado.
+
 ## Alcance del resultado
 
 El motor espera 55 velas diarias completas antes de abrir posiciones. Con datos del 1 de marzo al 1 de septiembre de 2026, el período operable empieza el 25 de abril de 2026. El resultado sigue siendo **exploratorio**: no hubo partición entrenamiento/validación/final, barrido de costos ni verificación de señales contra TradingView. Tampoco modela bid/ask real, mark price, órdenes limitadas, latencia ni reglas de liquidación de Binance.
